@@ -5,6 +5,7 @@
 #include <QDialogButtonBox>
 #include <QPushButton>
 #include <QElapsedTimer>
+#include <QDebug>
 
 #define MCAP_IMPLEMENTATION
 #include <mcap/reader.hpp>
@@ -95,16 +96,34 @@ DialogMCAP::DialogMCAP(const std::unordered_map<int, mcap::ChannelPtr>& channels
   for (const auto& [id, channel] : channels)
   {
     auto topic = QString::fromStdString(channel->topic);
-    auto const& schema = schemas.at(channel->schemaId);
-
-    ui->tableWidget->setItem(row, 0, new QTableWidgetItem(topic));
-    ui->tableWidget->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(schema->name)));
-    ui->tableWidget->setItem(row, 2,
-                             new QTableWidgetItem(QString::fromStdString(schema->encoding)));
-
     auto count_it = messages_count_by_channelID.find(id);
     int message_count = (count_it != messages_count_by_channelID.end()) ? count_it->second : 0;
-    ui->tableWidget->setItem(row, 3, new QTableWidgetItem(QString::number(message_count)));
+    auto schema_it = schemas.find(channel->schemaId);
+    if (schema_it == schemas.end())
+    {
+      qWarning() << "DialogMCAP: missing schema for channel"
+                 << "channel_id=" << id
+                 << "schema_id=" << channel->schemaId
+                 << "message_encoding=" << QString::fromStdString(channel->messageEncoding)
+                 << "topic=" << topic
+                 << "schemas_count=" << schemas.size();
+      ui->tableWidget->setItem(row, 0, new QTableWidgetItem(topic));
+      ui->tableWidget->setItem(row, 1,
+                               new QTableWidgetItem(QString("<missing schema %1>")
+                                                        .arg(int(channel->schemaId))));
+      ui->tableWidget->setItem(row, 2,
+                               new QTableWidgetItem(QString::fromStdString(channel->messageEncoding)));
+      ui->tableWidget->setItem(row, 3, new QTableWidgetItem(QString::number(message_count)));
+    }
+    else
+    {
+      auto const& schema = schema_it->second;
+      ui->tableWidget->setItem(row, 0, new QTableWidgetItem(topic));
+      ui->tableWidget->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(schema->name)));
+      ui->tableWidget->setItem(row, 2,
+                               new QTableWidgetItem(QString::fromStdString(schema->encoding)));
+      ui->tableWidget->setItem(row, 3, new QTableWidgetItem(QString::number(message_count)));
+    }
 
     for (int col = 0; col < columns_count; ++col)
     {

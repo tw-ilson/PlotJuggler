@@ -5,6 +5,7 @@ qt5_wrap_ui(UI_SRC dialog_mcap.ui)
 
 add_library(DataLoadMCAP SHARED dataload_mcap.cpp dialog_mcap.cpp ${UI_SRC})
 target_include_directories(DataLoadMCAP PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty)
+target_compile_definitions(DataLoadMCAP PRIVATE QT_MESSAGELOGCONTEXT)
 
 target_link_libraries(DataLoadMCAP
    PRIVATE

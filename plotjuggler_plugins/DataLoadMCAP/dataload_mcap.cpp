@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QElapsedTimer>
 #include <QStandardItemModel>
+#include <QByteArray>
 #include <QtConcurrent>
 
 #include <set>
@@ -279,10 +280,19 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
       ->second.pushBack({ 0, std::any(info->filename.toStdString()) });
 
   const auto& statistics = summaryInfo.statistics;
+  qInfo() << "DataLoadMCAP: summary loaded"
+          << "file=" << info->filename
+          << "method=" << (usedSelectiveSummary ? "selective" : "full")
+          << "schemas=" << summaryInfo.schemas.size()
+          << "channels=" << summaryInfo.channels.size()
+          << "has_statistics=" << bool(statistics)
+          << "stats_channels="
+          << (statistics ? statistics->channelMessageCounts.size() : size_t(0));
 
   std::unordered_map<int, mcap::SchemaPtr> mcap_schemas;         // schema_id
   std::unordered_map<int, mcap::ChannelPtr> channels;            // channel_id
   std::unordered_map<int, MessageParserPtr> parsers_by_channel;  // channel_id
+  std::unordered_map<int, QString> parser_encoding_by_channel;   // channel_id
 
   int total_dt_schemas = 0;
 
@@ -320,6 +330,8 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     }
     _dialog_parameters = dialog.getParams();
   }
+  qInfo() << "DataLoadMCAP: user topic selection"
+          << "selected_topics=" << _dialog_parameters->selected_topics.size();
 
   std::set<QString> notified_encoding_problem;
 
@@ -333,6 +345,8 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
   };
 
   std::map<std::string, FailedParserInfo> parsers_blacklist;
+  int missing_schema_count = 0;
+  int channels_with_missing_stats_count = 0;
 
   for (const auto& [channel_id, channel_ptr] : channels)
   {
@@ -343,31 +357,71 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     {
       continue;
     }
-    const auto& schema = mcap_schemas.at(channel_ptr->schemaId);
+    auto schema_it = mcap_schemas.find(channel_ptr->schemaId);
+    const mcap::Schema* schema = nullptr;
+    QString schema_name;
+    QString schema_encoding;
+    std::string definition;
+    if (schema_it == mcap_schemas.end())
+    {
+      missing_schema_count++;
+      qWarning() << "DataLoadMCAP: missing schema for channel, using channel messageEncoding only"
+                 << "channel_id=" << channel_id
+                 << "schema_id=" << channel_ptr->schemaId
+                 << "topic=" << QString::fromStdString(topic_name)
+                 << "message_encoding=" << QString::fromStdString(channel_ptr->messageEncoding)
+                 << "known_schemas=" << mcap_schemas.size();
+      schema_name = QString("<schema:%1>").arg(int(channel_ptr->schemaId));
+      schema_encoding = QString();
+      definition = std::string();
+    }
+    else
+    {
+      schema = schema_it->second.get();
+      schema_name = QString::fromStdString(schema->name);
+      schema_encoding = QString::fromStdString(schema->encoding);
+      definition = std::string(reinterpret_cast<const char*>(schema->data.data()), schema->data.size());
+    }
 
     // check if this schema is in the blacklist
-    auto blacklist_it = parsers_blacklist.find(schema->name);
+    auto blacklist_it = parsers_blacklist.find(schema_name.toStdString());
     if (blacklist_it != parsers_blacklist.end())
     {
       blacklist_it->second.topics.insert(channel_ptr->topic);
       continue;
     }
 
-    const std::string definition(reinterpret_cast<const char*>(schema->data.data()),
-                                 schema->data.size());
-
-    if (schema->name == "data_tamer_msgs/msg/Schemas")
+    if (schema && schema->name == "data_tamer_msgs/msg/Schemas")
     {
       channels_containing_datatamer_schema.insert(channel_id);
-      total_dt_schemas += statistics->channelMessageCounts.at(channel_id);
+      if (!statistics)
+      {
+        qWarning() << "DataLoadMCAP: statistics missing while counting data_tamer schemas"
+                   << "channel_id=" << channel_id;
+      }
+      else
+      {
+        auto msg_count_it = statistics->channelMessageCounts.find(channel_id);
+        if (msg_count_it == statistics->channelMessageCounts.end())
+        {
+          channels_with_missing_stats_count++;
+          qWarning() << "DataLoadMCAP: no channel count for data_tamer schema channel"
+                     << "channel_id=" << channel_id
+                     << "topic=" << QString::fromStdString(topic_name)
+                     << "available_counts=" << statistics->channelMessageCounts.size();
+        }
+        else
+        {
+          total_dt_schemas += msg_count_it->second;
+        }
+      }
     }
-    if (schema->name == "data_tamer_msgs/msg/Snapshot")
+    if (schema && schema->name == "data_tamer_msgs/msg/Snapshot")
     {
       channels_containing_datatamer_data.insert(channel_id);
     }
 
     QString channel_encoding = QString::fromStdString(channel_ptr->messageEncoding);
-    QString schema_encoding = QString::fromStdString(schema->encoding);
 
     auto it = parserFactories()->find(channel_encoding);
 
@@ -393,16 +447,26 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     try
     {
       auto& parser_factory = it->second;
-      auto parser = parser_factory->createParser(topic_name, schema->name, definition, plot_data);
+      auto parser = parser_factory->createParser(topic_name, schema_name.toStdString(), definition,
+                                                 plot_data);
 
       parsers_by_channel.insert({ channel_ptr->id, parser });
+      parser_encoding_by_channel.insert({ channel_ptr->id, it->first });
+      qInfo() << "DataLoadMCAP: parser selected"
+              << "topic=" << topic_name_qt
+              << "channel_id=" << channel_id
+              << "schema_id=" << channel_ptr->schemaId
+              << "channel_encoding=" << channel_encoding
+              << "schema_encoding=" << schema_encoding
+              << "parser_encoding=" << it->first
+              << "schema_name=" << schema_name;
     }
     catch (std::exception& e)
     {
       FailedParserInfo failed_parser_info;
       failed_parser_info.error_message = e.what();
       failed_parser_info.topics.insert(channel_ptr->topic);
-      parsers_blacklist.insert({ schema->name, failed_parser_info });
+      parsers_blacklist.insert({ schema_name.toStdString(), failed_parser_info });
     }
   };
 
@@ -434,17 +498,51 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
                                  _dialog_parameters->max_array_size);
     parser->enableEmbeddedTimestamp(_dialog_parameters->use_timestamp);
 
-    QString topic_name = QString::fromStdString(channels[channel_id]->topic);
+    auto channel_it = channels.find(channel_id);
+    if (channel_it == channels.end())
+    {
+      qCritical() << "DataLoadMCAP: parser exists for unknown channel"
+                  << "channel_id=" << channel_id
+                  << "known_channels=" << channels.size();
+      continue;
+    }
+    QString topic_name = QString::fromStdString(channel_it->second->topic);
     if (_dialog_parameters->selected_topics.contains(topic_name))
     {
       enabled_channels.insert(channel_id);
-      auto mcap_channel = channels[channel_id]->id;
-      if (statistics->channelMessageCounts.count(mcap_channel) != 0)
+      auto mcap_channel = channel_it->second->id;
+      if (!statistics)
       {
-        total_msgs += statistics->channelMessageCounts.at(channel_id);
+        qWarning() << "DataLoadMCAP: statistics missing while computing progress total"
+                   << "channel_id=" << channel_id
+                   << "topic=" << topic_name;
+      }
+      else
+      {
+        auto count_it = statistics->channelMessageCounts.find(mcap_channel);
+        if (count_it == statistics->channelMessageCounts.end())
+        {
+          channels_with_missing_stats_count++;
+          qWarning() << "DataLoadMCAP: no statistics entry for selected channel"
+                     << "channel_id=" << channel_id
+                     << "mcap_channel_id=" << mcap_channel
+                     << "topic=" << topic_name
+                     << "available_counts=" << statistics->channelMessageCounts.size();
+        }
+        else
+        {
+          total_msgs += count_it->second;
+        }
       }
     }
   }
+
+  qInfo() << "DataLoadMCAP: parser preflight complete"
+          << "selected_channels=" << enabled_channels.size()
+          << "active_parsers=" << parsers_by_channel.size()
+          << "missing_schemas=" << missing_schema_count
+          << "missing_stats_entries=" << channels_with_missing_stats_count
+          << "estimated_total_msgs=" << total_msgs;
 
   //-------------------------------------------
   //---------------- Parse messages -----------
@@ -502,7 +600,66 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
 
     auto parser = parser_it->second;
     MessageRef msg(msg_view.message.data, msg_view.message.dataSize);
-    parser->parseMessage(msg, timestamp_sec);
+    try
+    {
+      parser->parseMessage(msg, timestamp_sec);
+    }
+    catch (const std::exception& ex)
+    {
+      const auto channel_id = msg_view.channel->id;
+      const QString topic_name = QString::fromStdString(msg_view.channel->topic);
+      const QString channel_encoding = QString::fromStdString(msg_view.channel->messageEncoding);
+      auto parser_encoding_it = parser_encoding_by_channel.find(channel_id);
+      const QString parser_encoding =
+          (parser_encoding_it != parser_encoding_by_channel.end()) ? parser_encoding_it->second : "";
+      QString schema_name;
+      QString schema_encoding;
+      auto schema_it = mcap_schemas.find(msg_view.channel->schemaId);
+      if (schema_it == mcap_schemas.end())
+      {
+        schema_name = QString("<schema:%1>").arg(int(msg_view.channel->schemaId));
+      }
+      else
+      {
+        schema_name = QString::fromStdString(schema_it->second->name);
+        schema_encoding = QString::fromStdString(schema_it->second->encoding);
+      }
+
+      const int preview_size = int(std::min<size_t>(msg_view.message.dataSize, 64));
+      const QByteArray payload_preview(reinterpret_cast<const char*>(msg_view.message.data),
+                                       preview_size);
+      QString payload_preview_ascii;
+      payload_preview_ascii.reserve(preview_size);
+      for (char c : payload_preview)
+      {
+        const uchar uc = uchar(c);
+        payload_preview_ascii.append((uc >= 32 && uc <= 126) ? QChar(uc) : QChar('.'));
+      }
+      const QString payload_preview_hex = QString::fromLatin1(payload_preview.toHex(' '));
+
+      qCritical() << "DataLoadMCAP: parser exception"
+                  << "topic=" << topic_name
+                  << "channel_id=" << channel_id
+                  << "schema_id=" << msg_view.channel->schemaId
+                  << "channel_encoding=" << channel_encoding
+                  << "schema_encoding=" << schema_encoding
+                  << "parser_encoding=" << parser_encoding
+                  << "schema_name=" << schema_name
+                  << "payload_size=" << msg_view.message.dataSize
+                  << "payload_preview_ascii=" << payload_preview_ascii
+                  << "payload_preview_hex=" << payload_preview_hex
+                  << "what=" << ex.what();
+
+      auto err = QString("MCAP parse failure on topic [%1], channel_id [%2], schema_id [%3], "
+                         "channel_encoding [%4], parser_encoding [%5]: %6")
+                     .arg(topic_name)
+                     .arg(channel_id)
+                     .arg(int(msg_view.channel->schemaId))
+                     .arg(channel_encoding)
+                     .arg(parser_encoding)
+                     .arg(QString::fromLocal8Bit(ex.what()));
+      throw std::runtime_error(err.toStdString());
+    }
 
     if (msg_count++ % 100 == 0 && std::chrono::steady_clock::now() > new_progress_update)
     {
