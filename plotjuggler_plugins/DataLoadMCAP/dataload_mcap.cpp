@@ -280,7 +280,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
       ->second.pushBack({ 0, std::any(info->filename.toStdString()) });
 
   const auto& statistics = summaryInfo.statistics;
-  qInfo() << "DataLoadMCAP: summary loaded"
+  qDebug() << "DataLoadMCAP: summary loaded"
           << "file=" << info->filename
           << "method=" << (usedSelectiveSummary ? "selective" : "full")
           << "schemas=" << summaryInfo.schemas.size()
@@ -330,7 +330,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     }
     _dialog_parameters = dialog.getParams();
   }
-  qInfo() << "DataLoadMCAP: user topic selection"
+  qDebug() << "DataLoadMCAP: user topic selection"
           << "selected_topics=" << _dialog_parameters->selected_topics.size();
 
   std::set<QString> notified_encoding_problem;
@@ -452,7 +452,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
 
       parsers_by_channel.insert({ channel_ptr->id, parser });
       parser_encoding_by_channel.insert({ channel_ptr->id, it->first });
-      qInfo() << "DataLoadMCAP: parser selected"
+      qDebug() << "DataLoadMCAP: parser selected"
               << "topic=" << topic_name_qt
               << "channel_id=" << channel_id
               << "schema_id=" << channel_ptr->schemaId
@@ -501,7 +501,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     auto channel_it = channels.find(channel_id);
     if (channel_it == channels.end())
     {
-      qCritical() << "DataLoadMCAP: parser exists for unknown channel"
+      qWarning() << "DataLoadMCAP: parser exists for unknown channel"
                   << "channel_id=" << channel_id
                   << "known_channels=" << channels.size();
       continue;
@@ -537,7 +537,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
     }
   }
 
-  qInfo() << "DataLoadMCAP: parser preflight complete"
+  qDebug() << "DataLoadMCAP: parser preflight complete"
           << "selected_channels=" << enabled_channels.size()
           << "active_parsers=" << parsers_by_channel.size()
           << "missing_schemas=" << missing_schema_count
@@ -637,7 +637,7 @@ bool DataLoadMCAP::readDataFromFile(FileLoadInfo* info, PlotDataMapRef& plot_dat
       }
       const QString payload_preview_hex = QString::fromLatin1(payload_preview.toHex(' '));
 
-      qCritical() << "DataLoadMCAP: parser exception"
+      qWarning() << "DataLoadMCAP: parser exception"
                   << "topic=" << topic_name
                   << "channel_id=" << channel_id
                   << "schema_id=" << msg_view.channel->schemaId
